@@ -80,6 +80,15 @@
         text-align: center;
       }
 
+      .dataset-label {
+        grid-column: 1 / -1;
+        margin: 0;
+        color: #4a5568;
+        font-size: 0.78rem;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+      }
+
       .error {
         position: absolute;
         z-index: 2;
@@ -106,7 +115,8 @@
           width: 100%;
         }
 
-        .frame-label {
+        .frame-label,
+        .dataset-label {
           grid-column: auto;
         }
       }
@@ -130,6 +140,7 @@
       <p id="frame-label" class="frame-label" aria-live="polite">
         rain250m_0 · +0 min
       </p>
+      <p id="dataset-label" class="dataset-label"></p>
     </div>
 
     <p id="error" class="error" role="alert"></p>
@@ -137,11 +148,34 @@
     <script type="module">
       import * as maplibregl from "https://unpkg.com/maplibre-gl@6.0.0-21/dist/maplibre-gl.mjs";
 
-      const TILESET_URL = "https://ishikari-demo.mierune.dev/tilesets/weather/v2_rain250m_1812070000F?encoding=mlt";
-      // const TILESET_URL = "https://ishikari-demo.mierune.dev/tilesets/weather/v2_rain250m_1910120905F";
+      // const TILESET_URL =
+      //  "https://ishikari-demo.mierune.dev/tilesets/weather/v2_rain250m_201812070000F";
+      const TILESET_URL =
+         "https://ishikari-demo.mierune.dev/tilesets/weather/v2_rain250m_201910120905F?v=1785163237456985";
       const FRAME_COUNT = 12;
       const FRAME_DURATION_MS = 800;
+      const FRAME_INTERVAL_MIN = 5;
       const ACTIVE_FILL_OPACITY = 0.5;
+
+      // 表示中のデータセットとその基準時刻。過去のアーカイブなので、最新の
+      // 気象データと誤解されないよう画面にも明示する。
+      //
+      // タイルセット名の v2_rain250m_YYYYMMDDHHMM から導出する。手で書くと
+      // TILESET_URL を差し替えたときにラベルだけ古い日時のまま残るため。
+      const DATASET_ID = (() => {
+        const matched = TILESET_URL.match(/v2_rain250m_\d{12}F/);
+        if (!matched) {
+          throw new Error(
+            `タイルセット名から基準時刻を読み取れません: ${TILESET_URL}`,
+          );
+        }
+        return matched[0];
+      })();
+      const BASE_TIME_MS = (() => {
+        const [, year, month, day, hour, minute] =
+          DATASET_ID.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/);
+        return Date.UTC(+year, +month - 1, +day, +hour, +minute);
+      })();
       const prefersReducedMotion = window.matchMedia(
         "(prefers-reduced-motion: reduce)",
       ).matches;
@@ -149,19 +183,55 @@
       const playPauseButton = document.querySelector("#play-pause");
       const frameSlider = document.querySelector("#frame-slider");
       const frameLabel = document.querySelector("#frame-label");
+      const datasetLabel = document.querySelector("#dataset-label");
       const errorMessage = document.querySelector("#error");
 
       let currentFrame = 0;
       let animationTimer;
       let layersReady = false;
 
-      const map = new maplibregl.Map({
-        container: "map",
-        style:
-          "https://ishikari-demo.mierune.dev/styles/carto/voyager-gl-style/style.json",
-        center: [139.422, 35.839],
-        zoom: 6.99,
-        hash: true,
+      function showError(message) {
+        errorMessage.textContent = message;
+        errorMessage.style.display = "block";
+      }
+
+      function formatUtc(timeMs) {
+        const date = new Date(timeMs);
+        const pad = (value) => String(value).padStart(2, "0");
+        return (
+          `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}` +
+          ` ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`
+        );
+      }
+
+      datasetLabel.textContent = `デモ用の過去データ · ${DATASET_ID} · 基準時刻 ${formatUtc(BASE_TIME_MS)}`;
+
+      // 地図の生成は同期的に失敗しうる (WebGL2 非対応など)。map.on("error") は
+      // インスタンスが無いと登録できないため、ここは try/catch で受ける。
+      let map;
+      try {
+        map = new maplibregl.Map({
+          container: "map",
+          style:
+            "https://ishikari-demo.mierune.dev/styles/carto/voyager-gl-style/style.json",
+          center: [139.422, 35.839],
+          zoom: 6.99,
+          hash: true,
+        });
+      } catch (error) {
+        console.error(error);
+        showError(
+          `地図を初期化できませんでした。WebGL2 に対応したブラウザが必要です: ${error?.message ?? "不明なエラー"}`,
+        );
+        throw error;
+      }
+
+      // 以降の初期化より先に登録して、読み込み中のエラーを取りこぼさない。
+      map.on("error", (event) => {
+        console.error(event.error);
+        showError(
+          `地図の読み込み中にエラーが発生しました: ${event.error?.message ?? "不明なエラー"}`,
+        );
       });
 
       map.addControl(new maplibregl.NavigationControl(), "top-right");
@@ -172,8 +242,10 @@
       }
 
       function updateControls() {
+        const offsetMin = currentFrame * FRAME_INTERVAL_MIN;
+        const frameTime = formatUtc(BASE_TIME_MS + offsetMin * 60_000);
         frameSlider.value = String(currentFrame);
-        frameLabel.textContent = `rain250m_${currentFrame} · +${currentFrame * 5} min`;
+        frameLabel.textContent = `rain250m_${currentFrame} · ${frameTime} (+${offsetMin} min)`;
       }
 
       function showFrame(nextFrame) {
@@ -241,6 +313,8 @@
               visibility: "visible",
             },
             paint: {
+              // タイルは --quantize でこの step と同じ境界に量子化してある。
+              // 境界を変える場合は変換側の --quantize も合わせること。
               "fill-color": [
                 "step",
                 ["get", "value"],
@@ -286,12 +360,6 @@
         map.once("idle", () => {
           if (!prefersReducedMotion) play();
         });
-      });
-
-      map.on("error", (event) => {
-        console.error(event.error);
-        errorMessage.textContent = `地図の読み込み中にエラーが発生しました: ${event.error?.message ?? "不明なエラー"}`;
-        errorMessage.style.display = "block";
       });
     </script>
   </body>

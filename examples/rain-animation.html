@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>雨雲アニメーション | MapLibre GL JS</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@6.0.0-21/dist/maplibre-gl.css"
+    />
+    <style>
+      html,
+      body,
+      #map {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        font-family:
+          system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .controls {
+        position: absolute;
+        z-index: 1;
+        bottom: 24px;
+        left: 50%;
+        display: grid;
+        grid-template-columns: auto minmax(180px, 360px);
+        gap: 10px 14px;
+        align-items: center;
+        width: min(560px, calc(100% - 32px));
+        box-sizing: border-box;
+        padding: 14px 16px;
+        color: #17202a;
+        background: rgb(255 255 255 / 92%);
+        border-radius: 10px;
+        box-shadow: 0 2px 12px rgb(0 0 0 / 22%);
+        transform: translateX(-50%);
+        backdrop-filter: blur(6px);
+      }
+
+      .controls button {
+        min-width: 72px;
+        padding: 7px 12px;
+        color: white;
+        font: inherit;
+        font-weight: 700;
+        background: #2463a5;
+        border: 0;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+
+      .controls button:hover {
+        background: #174d85;
+      }
+
+
+
+      .controls button:focus-visible,
+      .controls input:focus-visible {
+        outline: 3px solid #ffbf47;
+        outline-offset: 2px;
+      }
+
+      .controls button:disabled,
+      .controls input:disabled {
+        cursor: wait;
+        opacity: 0.55;
+      }
+
+      .frame-label {
+        grid-column: 1 / -1;
+        margin: 0;
+        font-size: 0.9rem;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+      }
+
+      .error {
+        position: absolute;
+        z-index: 2;
+        top: 16px;
+        left: 50%;
+        display: none;
+        width: min(600px, calc(100% - 32px));
+        box-sizing: border-box;
+        padding: 12px 16px;
+        color: #721c24;
+        background: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 8px;
+        transform: translateX(-50%);
+      }
+
+      @media (max-width: 479px) {
+        .controls {
+          bottom: 12px;
+          grid-template-columns: 1fr;
+        }
+
+        .controls button {
+          width: 100%;
+        }
+
+        .frame-label {
+          grid-column: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map" aria-label="雨雲の分布を表示する地図"></div>
+
+    <div class="controls" aria-label="アニメーション操作">
+      <button id="play-pause" type="button" disabled>再生</button>
+      <input
+        id="frame-slider"
+        type="range"
+        min="0"
+        max="11"
+        step="1"
+        value="0"
+        aria-label="表示する雨雲レイヤー"
+        disabled
+      />
+      <p id="frame-label" class="frame-label" aria-live="polite">
+        rain250m_0 · +0 min
+      </p>
+    </div>
+
+    <p id="error" class="error" role="alert"></p>
+
+    <script type="module">
+      import * as maplibregl from "https://unpkg.com/maplibre-gl@6.0.0-21/dist/maplibre-gl.mjs";
+
+      const TILESET_URL = "https://ishikari-demo.mierune.dev/tilesets/weather/v2_rain250m_1812070000F?encoding=mlt";
+      // const TILESET_URL = "https://ishikari-demo.mierune.dev/tilesets/weather/v2_rain250m_1910120905F";
+      const FRAME_COUNT = 12;
+      const FRAME_DURATION_MS = 800;
+      const ACTIVE_FILL_OPACITY = 0.5;
+      const prefersReducedMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)",
+      ).matches;
+
+      const playPauseButton = document.querySelector("#play-pause");
+      const frameSlider = document.querySelector("#frame-slider");
+      const frameLabel = document.querySelector("#frame-label");
+      const errorMessage = document.querySelector("#error");
+
+      let currentFrame = 0;
+      let animationTimer;
+      let layersReady = false;
+
+      const map = new maplibregl.Map({
+        container: "map",
+        style:
+          "https://ishikari-demo.mierune.dev/styles/carto/voyager-gl-style/style.json",
+        center: [139.422, 35.839],
+        zoom: 6.99,
+        hash: true,
+      });
+
+      map.addControl(new maplibregl.NavigationControl(), "top-right");
+      map.addControl(new maplibregl.GlobeControl(), "top-right");
+
+      function layerId(frame) {
+        return `rain250m-${frame}`;
+      }
+
+      function updateControls() {
+        frameSlider.value = String(currentFrame);
+        frameLabel.textContent = `rain250m_${currentFrame} · +${currentFrame * 5} min`;
+      }
+
+      function showFrame(nextFrame) {
+        if (!layersReady || nextFrame === currentFrame) {
+          currentFrame = nextFrame;
+          updateControls();
+          return;
+        }
+
+        map.setPaintProperty(
+          layerId(nextFrame),
+          "fill-opacity",
+          ACTIVE_FILL_OPACITY,
+        );
+        map.setPaintProperty(layerId(currentFrame), "fill-opacity", 0);
+        currentFrame = nextFrame;
+        updateControls();
+      }
+
+      function pause() {
+        if (animationTimer !== undefined) {
+          window.clearInterval(animationTimer);
+          animationTimer = undefined;
+        }
+        playPauseButton.textContent = "再生";
+        playPauseButton.setAttribute("aria-pressed", "false");
+      }
+
+      function play() {
+        if (!layersReady || animationTimer !== undefined) return;
+
+        animationTimer = window.setInterval(() => {
+          showFrame((currentFrame + 1) % FRAME_COUNT);
+        }, FRAME_DURATION_MS);
+        playPauseButton.textContent = "一時停止";
+        playPauseButton.setAttribute("aria-pressed", "true");
+      }
+
+      playPauseButton.addEventListener("click", () => {
+        if (animationTimer === undefined) {
+          play();
+        } else {
+          pause();
+        }
+      });
+
+      frameSlider.addEventListener("input", (event) => {
+        pause();
+        showFrame(Number(event.currentTarget.value));
+      });
+
+      map.on("load", () => {
+        map.addSource("hrnowc", {
+          type: "vector",
+          url: TILESET_URL,
+        });
+
+        for (let index = 0; index < FRAME_COUNT; index += 1) {
+          map.addLayer({
+            id: layerId(index),
+            type: "fill",
+            source: "hrnowc",
+            "source-layer": `rain250m_${index}`,
+            layout: {
+              visibility: "visible",
+            },
+            paint: {
+              "fill-color": [
+                "step",
+                ["get", "value"],
+                "#ADFFFF",
+                1,
+                "#4DFFFF",
+                2,
+                "#00CCFF",
+                4,
+                "#4791db",
+                8,
+                "#0099FF",
+                12,
+                "#33FF00",
+                16,
+                "#33CC00",
+                24,
+                "#199900",
+                32,
+                "#FFFF00",
+                40,
+                "#FFCC00",
+                48,
+                "#FF9900",
+                56,
+                "#FF5066",
+                64,
+                "#FF0000",
+                80,
+                "#B70014",
+              ],
+              "fill-opacity": index === 0 ? ACTIVE_FILL_OPACITY : 0,
+              "fill-outline-color": "transparent",
+            },
+          });
+        }
+
+        layersReady = true;
+        playPauseButton.disabled = false;
+        frameSlider.disabled = false;
+        updateControls();
+
+        map.once("idle", () => {
+          if (!prefersReducedMotion) play();
+        });
+      });
+
+      map.on("error", (event) => {
+        console.error(event.error);
+        errorMessage.textContent = `地図の読み込み中にエラーが発生しました: ${event.error?.message ?? "不明なエラー"}`;
+        errorMessage.style.display = "block";
+      });
+    </script>
+  </body>
+</html>
